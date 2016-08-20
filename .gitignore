@@ -1,1 +1,5 @@
 *.stl
+*.ods
+EncoderGearMotor/.vs/
+EncoderGearMotor/EncoderGearMotor/Debug/
+EncoderGearMotor/EncoderGearMotor/Release/
