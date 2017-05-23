@@ -306,7 +306,7 @@ module gear (
 	// Pitch diameter: Diameter of pitch circle.
 	pitch_diameter  =  number_of_teeth * circular_pitch / 180;
 	pitch_radius = pitch_diameter/2;
-	echo ("Teeth:", number_of_teeth, " Pitch radius:", pitch_radius);
+	//echo ("Teeth:", number_of_teeth, " Pitch radius:", pitch_radius);
 
 	// Base Circle
 	base_radius = pitch_radius*cos(pressure_angle);

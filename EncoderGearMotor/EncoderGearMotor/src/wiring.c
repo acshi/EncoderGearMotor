@@ -70,7 +70,7 @@
 #define FRACT_INC ((MICROSECONDS_PER_MILLIS_OVERFLOW % 1000) >> 3)
 #define FRACT_MAX (1000 >> 3)
 
-//volatile unsigned long millis_timer_overflow_count = 0;
+volatile unsigned long millis_timer_overflow_count = 0;
 volatile unsigned long millis_timer_millis = 0;
 static unsigned char millis_timer_fract = 0;
 
@@ -105,7 +105,7 @@ ISR(MILLISTIMER_OVF_vect)
 
   millis_timer_fract = f;
   millis_timer_millis = m;
-  //millis_timer_overflow_count++;
+  millis_timer_overflow_count++;
 }
 
 unsigned long millis()
@@ -122,7 +122,7 @@ unsigned long millis()
   return m;
 }
 
-/*unsigned long micros() 
+unsigned long micros() 
 {
   unsigned long m;
   uint8_t oldSREG = SREG, t;
@@ -137,7 +137,7 @@ unsigned long millis()
   SREG = oldSREG;
   
   return ((m << 8) + t) * (MillisTimer_Prescale_Value / clockCyclesPerMicrosecond());
-}*/
+}
 
 void delay(unsigned long ms)
 {

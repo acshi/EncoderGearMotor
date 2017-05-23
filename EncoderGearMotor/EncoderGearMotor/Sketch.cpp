@@ -3,22 +3,53 @@
 //#include <USI_TWI_Slave.h>
 #include <TinyWireS.h>
 
-#define MOTOR_FORWARD_PIN 0
-#define MOTOR_BACKWARD_PIN 1
-#define JUMPER_0_PIN 3
-#define JUMPER_1_PIN 2
-#define JUMPER_2_PIN 7
-#define JUMPER_3_PIN 8
-#define ENCODER_PIN 0 // ADC0
-#define HOMING_PIN 1 // ADC1
+#define MOTOR_FORWARD_PIN 2
+#define MOTOR_BACKWARD_PIN 3
+#define JUMPER_0_PIN 0
+#define JUMPER_1_PIN 1
+#define JUMPER_2_PIN 8
+#define JUMPER_3_PIN 7
+#define ENCODER_PIN 1 // Encoder A, ADC1
+#define HOMING_PIN 0 // Encoder B, ADC0
 
 uint8_t twiAddress = 0;
 
-// Encoder values
-#define ENCODER_HIGH_THRESHOLD 900
-#define ENCODER_LOW_THRESHOLD 400
+//#define SUM_READS_N 4
+
+// Encoder
+#define MIN_PEAK_PEAK_DIF 7
+#define MIN_PEAK_RESET_DIF 35
+#define MIN_PEAK_VALLEY_DIF 3
+#define MAX_RETURN_DIF 10
+#define MIN_DIF_FROM_AVG1 4
+#define MIN_DIF_FROM_AVG2 10
+// these are out of 100
+#define AVG_RECENT_BETA1 1
+#define AVG_RECENT_BETA2 10
+
+uint8_t tickState = 0;
+bool inValley = true;
+uint8_t lastChange = 0;
+
+int secondLastPeak = -1;
+int lastPeak = -1;
+int lastValley = -1;
+int peak = -1;
+int valley = -1;
+
+int avgRecentVal1 = 0;
+int avgRecentVal2 = 0;
+
 int encoderValue = 0;
-int lastEncoderValue = 0;
+
+// modulate running average of speed, out of 100, 100 = 1.00
+#define SPEED_MEASURE_BETA 40
+
+int lastPeakMillis = 0;
+int peakMillis = 0;
+
+int targetSpeed = 0;
+int measuredSpeed = 0;
 
 /*#define ENCODER_BLACK_THRESHOLD 400
 #define ENCODER_WHITE_THRESHOLD 900
@@ -47,28 +78,37 @@ int homingValue = 0;
 //int lastHomingValue = 0;
 int firstHomingValue = 0;
 bool homingDirectionDecided = false;
-bool isHoming = true;
+bool isHoming = false;
 
-// In 10ths of a degree (encoder ticks) so 0 to 3599
-int setAngle = 0;
-int currentAngle = 0;
+// In 100ths of a degree (encoder ticks) so 0 to 35999
+// In ticks of 1.8 degrees each.
+int targetTicks = 0;
+int ticks = 0;
 
 // PID_MIN_OUT to PID_MAX_OUT
 // Start ready to home
-int motorOutput = HOMING_SPEED;
+int motorOutput = 0;
 byte motorDirection = 0;
+// Keep track of last setting applied
+int lastMotorOutput = -1;
 
 // PID control constants and variables
 #define PID_UPDATE_INTERVAL 100 // in ms
-#define PID_MIN_OUT -255
-#define PID_MAX_OUT 255
+#define PID_MIN_OUT -160
+#define PID_MAX_OUT 160
 // These values are all in fixed point. 1024 is 1.000.
-int motorP = 1024;
-int motorI = 10 * PID_UPDATE_INTERVAL;
-int motorD = 300 / PID_UPDATE_INTERVAL;
+#define ANGLE_MOTOR_P 1024
+#define ANGLE_MOTOR_I (10 * PID_UPDATE_INTERVAL)
+#define ANGLE_MOTOR_D (300 / PID_UPDATE_INTERVAL)
+
+#define SPEED_MOTOR_P 1024
+#define SPEED_MOTOR_I (10 * PID_UPDATE_INTERVAL)
+#define SPEED_MOTOR_D (300 / PID_UPDATE_INTERVAL)
+
 uint16_t lastUpdateTime = 0;
 int motorITerm = 0;
-int lastCurrentAngle = 0;
+int lastTicks = 0;
+int lastMeasuredSpeed = 0;
 
 // Communication
 #define READ_ANGLE_MSG 1
@@ -87,40 +127,74 @@ int lastCurrentAngle = 0;
 #define READ_ADC5_MSG 14
 #define READ_ADC6_MSG 15
 #define READ_ADC7_MSG 16
+#define SET_RAW_MOTOR_MSG 17
+#define READ_RAW_MOTOR_MSG 18
+#define SET_TARGET_SPEED_MSG 19
+#define READ_TARGET_SPEED_MSG 20
+#define READ_MEASURED_SPEED_MSG 21
+#define DO_HOMING_MSG 22
 
+// Control modes
+#define RAW_MOTOR_CONTROL 0
+#define SPEED_CONTROL 1
+#define ANGLE_CONTROL 2
+byte controlMode = RAW_MOTOR_CONTROL;
+
+bool receivingSetRawMotor = false;
 bool receivingSetAngle = false;
+bool receivingSetSpeed = false;
 bool hasHighByte = false;
-byte setAngleHighByte;
+byte setValueHighByte;
+
+// We do not need the full 32-bit resolution of millis, so we save space by doing 16-bit operations
+// Rollover is not a problem as the _unsigned_ subtraction will still work out.
+uint16_t millis16() {
+    return (uint16_t)(millis() & 0xffff);
+}
 
 void updatePid() {
-    if (!isHoming) {
-        // We do not need the full 32-bit resolution of millis, so we save space by doing 16-bit operations
-        // Rollover is not a problem as the _unsigned_ subtraction will still work out.
-        uint16_t now = (uint16_t)(millis() & 0xffff);
-        if (now - lastUpdateTime > PID_UPDATE_INTERVAL) {
-            int error = setAngle - currentAngle;
-            motorITerm += motorI * error >> 10;
-            if (motorITerm < PID_MIN_OUT) {
-                motorITerm = PID_MIN_OUT;
-            } else if (motorITerm > PID_MAX_OUT) {
-                motorITerm = PID_MAX_OUT;
-            }
+    if (controlMode == RAW_MOTOR_CONTROL || isHoming) {
+        return; // no PID for these
+    }
 
-            motorOutput = (motorP * error >> 10) + motorITerm + (motorD * (currentAngle - lastCurrentAngle) >> 10);
-            // analogWrite will constrain the value for us to 255. Save 30 bytes here...
-            /*if (motorOutput < PID_MIN_OUT) {
-                motorOutput = PID_MIN_OUT;
-            } else if (motorOutput > PID_MAX_OUT) {
-                motorOutput = PID_MAX_OUT;
-            }*/
-
-            lastCurrentAngle = currentAngle;
-            lastUpdateTime = now;
+    uint16_t now = millis16();
+    if (now - lastUpdateTime > PID_UPDATE_INTERVAL) {
+        int motorP;
+        int motorI;
+        int motorD;
+        int error;
+        int derivative;
+        if (controlMode == SPEED_CONTROL) {
+            motorP = SPEED_MOTOR_P;
+            motorI = SPEED_MOTOR_I;
+            motorD = SPEED_MOTOR_D;
+            error = targetSpeed - measuredSpeed;
+            derivative = measuredSpeed - lastMeasuredSpeed;
+        } else {
+            motorP = ANGLE_MOTOR_P;
+            motorI = ANGLE_MOTOR_I;
+            motorD = ANGLE_MOTOR_D;
+            error = targetTicks - ticks;
+            derivative = ticks - lastTicks;
         }
+
+        // Remember that here we use fixed point 1024 as 1.0, hence the 10-bit shifts.
+        motorITerm += motorI * error >> 10;
+        if (motorITerm < PID_MIN_OUT) {
+            motorITerm = PID_MIN_OUT;
+        } else if (motorITerm > PID_MAX_OUT) {
+            motorITerm = PID_MAX_OUT;
+        }
+
+        motorOutput = (motorP * error >> 10) + motorITerm + (motorD * derivative >> 10);
+        
+        lastTicks = ticks;
+        lastMeasuredSpeed = measuredSpeed;
+        lastUpdateTime = now;
     }
 }
 
-/*void setupTimerInterrupts() {
+void setupTimerInterrupts() {
     Timer1_SetToPowerup(); // Turn all settings off!
 
     Timer1_SetWaveformGenerationMode(Timer1_Fast_PWM_FF); // Top is 0xFF, OCR1A is used to modify duty cycle
@@ -134,7 +208,7 @@ void updatePid() {
 
 ISR(TIMER1_OVF_vect) {
     if (motorDirection == 0) {
-        //digitalWrite(MOTOR_BACKWARD_PIN, HIGH);
+        digitalWrite(MOTOR_BACKWARD_PIN, HIGH);
     } else if (motorDirection == 1) {
         digitalWrite(MOTOR_FORWARD_PIN, HIGH);
     }
@@ -148,88 +222,117 @@ ISR(TIMER1_COMPA_vect) {
             digitalWrite(MOTOR_FORWARD_PIN, LOW);
         }
     }
-}*/
+}
 
 void updateMotor() {
-    if (motorOutput == 0) {
-        motorDirection = 2;
+    if (motorOutput < PID_MIN_OUT) {
+        motorOutput = PID_MIN_OUT;
+    } else if (motorOutput > PID_MAX_OUT) {
+        motorOutput = PID_MAX_OUT;
+    }
+
+    if (motorOutput != lastMotorOutput) {
+        lastMotorOutput = motorOutput;
         digitalWrite(MOTOR_FORWARD_PIN, LOW);
         digitalWrite(MOTOR_BACKWARD_PIN, LOW);
-        pinMode(JUMPER_3_PIN, INPUT);
-    } else if (motorOutput < 0) {
-        motorDirection = 0;
-        digitalWrite(MOTOR_FORWARD_PIN, LOW);
-        //digitalWrite(MOTOR_BACKWARD_PIN, HIGH);
-        Timer1_SetOutputCompareMatchA(-motorOutput);
-        //analogWrite(MOTOR_FORWARD_PIN, 0);
-        //analogWrite(MOTOR_BACKWARD_PIN, -motorOutput);
-    } else {
-        motorDirection = 1;
-        digitalWrite(MOTOR_BACKWARD_PIN, LOW);
-        digitalWrite(MOTOR_FORWARD_PIN, HIGH);
-        pinMode(JUMPER_3_PIN, INPUT_PULLUP);
-        Timer1_SetOutputCompareMatchA(motorOutput);
-        //analogWrite(MOTOR_BACKWARD_PIN, 0);
-        //analogWrite(MOTOR_FORWARD_PIN, motorOutput);
+        if (motorOutput == 0) {
+            motorDirection = 2;
+        } else if (motorOutput < 0) {
+            motorDirection = 0;
+            Timer1_SetOutputCompareMatchA(-motorOutput);
+        } else {
+            motorDirection = 1;
+            Timer1_SetOutputCompareMatchA(motorOutput);
+        }
     }
 }
 
-/*void updateEncoder() {
-    if (isHoming) {
-        int encoderCValue = analogRead(ENCODER_C_PIN);
-        if (encoderCValue >= HOMING4_RIGHT_SIDE) {
-            currentAngle = 900;
-            isHoming = false;
-        } else if (encoderCValue >= HOMING3_LEFT_SIDE) {
-            currentAngle = 2700;
-            isHoming = false;
-        } else if (encoderCValue >= HOMING2_CENTER) {
-            currentAngle = 0;
-            isHoming = false;
-        } else if (encoderCValue >= HOMING1_CLOCK_WISE) {
-            motorOutput = 100;
-        } else if (encoderCValue >= HOMING0_COUNTER_CLOCK) {
-            motorOutput = -100;
-        }
-    } else {
-        int encoderAValue = analogRead(ENCODER_PIN);
-        int encoderBValue = analogRead(ENCODER_B_PIN);
-
-        if ((!lastEncoderA && encoderAValue > ENCODER_WHITE_THRESHOLD) ||
-            (lastEncoderA && encoderAValue < ENCODER_BLACK_THRESHOLD)) {
-            if (lastEncoderB == lastEncoderA) {
-                currentAngle++;
-            } else {
-                currentAngle--;
-            }
-            lastEncoderA = !lastEncoderA;
-        }
-
-        if ((!lastEncoderB && encoderBValue > ENCODER_WHITE_THRESHOLD) ||
-            (lastEncoderB && encoderBValue < ENCODER_BLACK_THRESHOLD)) {
-            if (lastEncoderA == lastEncoderB) {
-                currentAngle--;
-            } else {
-                currentAngle++;
-            }
-            lastEncoderB = !lastEncoderB;
-        }
+/*int sumAnalogRead(uint8_t pin) {
+    int sum = 0;
+    for(uint8_t i = 0; i < SUM_READS_N; i++) {
+        sum += analogRead(pin);
     }
+    return sum;
 }*/
 
+// The encoder has holes of three different sizes. Because of 3d-printing, they are not extremely
+// consistent. So we try to use as much good reason here as possible!
+// We keep track of valleys (the space between holes with little light passing through)
+// and peaks (the center of the holes where the most light gets through)
+// and basically look to see if the pattern of hole size is small-medium-big or big-medium-small.
 void updateEncoder() {
-    // Count encoder ticks
     encoderValue = analogRead(ENCODER_PIN);
 
-    if (lastEncoderValue >= ENCODER_HIGH_THRESHOLD &&
-        encoderValue <= ENCODER_LOW_THRESHOLD) {
-        currentAngle++;
-    } else if (encoderValue >= ENCODER_HIGH_THRESHOLD &&
-               lastEncoderValue <= ENCODER_LOW_THRESHOLD) {
-        currentAngle--;
+    if (avgRecentVal1 == 0) {
+        avgRecentVal1 = encoderValue;
+        avgRecentVal2 = encoderValue;
+    } else {
+        avgRecentVal1 = (avgRecentVal1 * (100 - AVG_RECENT_BETA1) + encoderValue * AVG_RECENT_BETA1) / 100;
+        avgRecentVal2 = (avgRecentVal2 * (100 - AVG_RECENT_BETA2) + encoderValue * AVG_RECENT_BETA2) / 100;
     }
-    lastEncoderValue = encoderValue;
 
+    if (abs(avgRecentVal1 - encoderValue) >= MIN_DIF_FROM_AVG1 || abs(avgRecentVal2 - encoderValue) >= MIN_DIF_FROM_AVG2) {
+        if (inValley && encoderValue >= valley + MIN_PEAK_VALLEY_DIF) {
+            if (valley != -1) {
+                lastValley = valley;
+                valley = -1;
+            }
+            inValley = false;
+        } else if (!inValley && peak != -1 && encoderValue <= peak - MIN_PEAK_VALLEY_DIF) {
+            uint8_t ticksChange = 0;
+            int absReturnDiff = abs(secondLastPeak - peak);
+            if (peak >= lastValley + MIN_PEAK_VALLEY_DIF) {
+                if (peak >= lastPeak + MIN_PEAK_PEAK_DIF && tickState < 2 &&
+                        (lastChange != -1 || absReturnDiff <= MAX_RETURN_DIF)) {
+                    tickState = tickState + 1;
+                    ticks++;
+                    ticksChange = 1;
+                    // allow next peak to go either way
+                    lastChange = lastChange == -1 ? 0 : 1;
+                } else if (peak <= lastPeak - MIN_PEAK_RESET_DIF && tickState == 2 &&
+                        (lastChange != -1 || absReturnDiff <= MAX_RETURN_DIF)) {
+                    tickState = 0;
+                    ticks++;
+                    ticksChange = 1;
+                    lastChange = lastChange == -1 ? 0 : 1;
+                } else if (peak <= lastPeak - MIN_PEAK_PEAK_DIF && tickState > 0 &&
+                        (lastChange != 1 || absReturnDiff <= MAX_RETURN_DIF)) {
+                    tickState = tickState - 1;
+                    ticks--;
+                    ticksChange = -1;
+                    lastChange = lastChange == 1 ? 0 : -1;
+                } else if (peak >= lastPeak + MIN_PEAK_RESET_DIF && tickState == 0 &&
+                        (lastChange != 1 || absReturnDiff <= MAX_RETURN_DIF)) {
+                    tickState = 2;
+                    ticks--;
+                    ticksChange = -1;
+                    lastChange = lastChange == 1 ? 0 : -1;
+                }
+            }
+            
+            secondLastPeak = lastPeak;
+            lastPeak = peak;
+            if (ticksChange != 0) {
+                lastPeakMillis = peakMillis;
+                peakMillis = millis16();
+                if (lastPeakMillis != 0) {
+                    measuredSpeed = (measuredSpeed * (100 - SPEED_MEASURE_BETA) + (ticksChange * 18 * 1000 / (peakMillis - lastPeakMillis)) * SPEED_MEASURE_BETA) / 100;
+                }
+            }
+        
+            peak = -1;
+            inValley = true;
+        }
+    
+        if (!inValley && (peak == -1 || encoderValue > peak)) {
+            peak = encoderValue;
+        } else if (inValley && (valley == -1 || encoderValue < valley)) {
+            valley = encoderValue;
+        }
+    }
+}
+
+void updateHoming() {
     homingValue = analogRead(HOMING_PIN);
     if (isHoming) {
         // Just turn on motor forward, slow, for initialization
@@ -245,7 +348,7 @@ void updateEncoder() {
             }
             if (homingValue < homingMinValue) {
                 homingMinValue = homingValue;
-                homingMinAngle = currentAngle;
+                homingMinAngle = ticks;
             } else if (homingValue > homingMinValue + HOMING_PASSED_THRESHOLD) {
                 // The minimum is the homed on value
                 byte homedOnIndex = 0;
@@ -262,7 +365,7 @@ void updateEncoder() {
                 } else if (homingMinValue <= HOMING_300) {
                     homedOnIndex = 5;
                 }
-                currentAngle = currentAngle - homingMinValue + 60 * homedOnIndex;
+                ticks = ticks - homingMinValue + 60 * homedOnIndex;
                 isHoming = false;
             }
         } else {
@@ -275,15 +378,31 @@ void updateControl() {
     while (TinyWireS.available()) {
         byte newByte = TinyWireS.receive();
 
-        if (receivingSetAngle) {
+        if (receivingSetAngle || receivingSetRawMotor || receivingSetSpeed) {
             if (!hasHighByte) {
-                setAngleHighByte = newByte;
+                setValueHighByte = newByte;
                 hasHighByte = true;
             } else {
-                setAngle = (setAngleHighByte << 8) + newByte;
-                receivingSetAngle = false;
+                int value = (setValueHighByte << 8) + newByte;
+                if (receivingSetAngle) {
+                    controlMode = ANGLE_CONTROL;
+                    motorITerm = 0;
+                    targetTicks = (value + 9) / 18;
+                    receivingSetAngle = false;
+                } else if (receivingSetRawMotor) {
+                    controlMode = RAW_MOTOR_CONTROL;
+                    motorOutput = value;
+                    receivingSetRawMotor = false;
+                } else if (receivingSetSpeed) {
+                    controlMode = SPEED_CONTROL;
+                    motorITerm = 0;
+                    targetSpeed = value;
+                    receivingSetSpeed = false;
+                }
+                hasHighByte = false;
             }
         } else {
+            int setAngle;
             switch (newByte) {
                 case READ_ANGLE_MSG:
                     // Send a "no angle" signal when we haven't homed to find out yet
@@ -291,17 +410,17 @@ void updateControl() {
                         TinyWireS.send(0xff);
                         TinyWireS.send(0xff);
                     } else {
-                        TinyWireS.send((currentAngle >> 8) & 0xff);
-                        TinyWireS.send(currentAngle & 0xff);
+                        TinyWireS.send((ticks >> 8) & 0xff);
+                        TinyWireS.send(ticks & 0xff);
                     }
                     break;
                 case SET_ANGLE_MSG:
                     receivingSetAngle = true;
-                    hasHighByte = false;
                     break;
                 case READ_SET_ANGLE_MSG:
-                    TinyWireS.send((setAngle >> 8) & 0xff);
-                    TinyWireS.send(setAngle & 0xff);
+                    setAngle = targetTicks * 18;
+                    TinyWireS.send((targetTicks >> 8) & 0xff);
+                    TinyWireS.send(targetTicks & 0xff);
                     break;
                 case READ_ENCODER_MSG:
                     TinyWireS.send((encoderValue >> 8) & 0xff);
@@ -322,6 +441,27 @@ void updateControl() {
                 case VALUE_TEST_MSG:
                     TinyWireS.send((1023 >> 8) & 0xff);
                     TinyWireS.send(1023 & 0xff);
+                    break;
+                case SET_RAW_MOTOR_MSG:
+                    receivingSetRawMotor = true;
+                    break;
+                case READ_RAW_MOTOR_MSG:
+                    TinyWireS.send((motorOutput >> 8) & 0xff);
+                    TinyWireS.send(motorOutput & 0xff);
+                    break;
+                case SET_TARGET_SPEED_MSG:
+                    receivingSetSpeed = true;
+                    break;
+                case READ_TARGET_SPEED_MSG:
+                    TinyWireS.send((targetSpeed >> 8) & 0xff);
+                    TinyWireS.send(targetSpeed & 0xff);
+                    break;
+                case READ_MEASURED_SPEED_MSG:
+                    TinyWireS.send((measuredSpeed >> 8) & 0xff);
+                    TinyWireS.send(measuredSpeed & 0xff);
+                    break;
+                case DO_HOMING_MSG:
+                    isHoming = true;
                     break;
             }
             if (newByte >= READ_ADC0_MSG && newByte <= READ_ADC7_MSG) {
@@ -347,29 +487,16 @@ void setup() {
     pinMode(JUMPER_3_PIN, INPUT_PULLUP);
     twiAddress += digitalRead(JUMPER_3_PIN) << 3;
 
-    if ((twiAddress - 8) & 1) {
-        pinMode(JUMPER_0_PIN, INPUT);
-    }
-    if ((twiAddress - 8) & 2) {
-        pinMode(JUMPER_1_PIN, INPUT);
-    }
-    if ((twiAddress - 8) & 4) {
-        pinMode(JUMPER_2_PIN, INPUT);
-    }
-    if ((twiAddress - 8) & 8) {
-        pinMode(JUMPER_3_PIN, INPUT);
-    }
-
     TinyWireS.begin(twiAddress);
 
     pinMode(MOTOR_FORWARD_PIN, OUTPUT);
     pinMode(MOTOR_BACKWARD_PIN, OUTPUT);
 
-    //setupTimerInterrupts();
+    setupTimerInterrupts();
     motorOutput = 0;
     digitalWrite(MOTOR_FORWARD_PIN, LOW);
     digitalWrite(MOTOR_BACKWARD_PIN, LOW);
-    //updateMotor();
+    updateMotor();
 
     // 5V internal analog reference
     analogReference(DEFAULT);
@@ -378,6 +505,7 @@ void setup() {
 void loop() {
     updateControl();
     updateEncoder();
-    //updatePid();
-    //updateMotor();
+    updateHoming();
+    updatePid();
+    updateMotor();
 }

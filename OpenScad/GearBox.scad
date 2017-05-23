@@ -7,25 +7,32 @@ module polyhole(h, d) {
         cylinder(h = h, r = (d / 2) / cos (180 / n), $fn = n);
 }
 
+// Shift the motor in the x direction to help with teeth mating to the next gear stage.
+// All the other gears are not as rigid as the motor, so the amount of play is different,
+// in this case versus all the others.
+motorXOffset = -1;
 pinionTeeth = 10;
-receivingGearTeeth = 45;
+receivingGearTeeth = 42;
+
+pitchRadiiAdjust = -0.7; // adjust the distance between gears so teeth mesh well
 
 useHarringbone = 0;
 
 clearance = 0.75;
-minClearance = 0.3;
+minClearance = 0.45;
 
-circularPitch = 0.35 * 360; //distance between consecutive teeth * 360
-gearAxleDiameter = 2.75; //use 1.75mm filament for the axles!
+circularPitch = 0.5 * 360;//0.35 * 360; //distance between consecutive teeth * 360
+gearAxleDiameter = 2.5; //use 1.75mm filament for the axles!
 
 hubDiameter = 5; //around hole
 rimWidth = 2; //around teeth
 hubThickness = 3; //center
 receivingGearThickness = 3.5;
-pinionGearThickness = receivingGearThickness + 2;
+pinionGearThickness = receivingGearThickness + 2.5;
+gear0Thickness = receivingGearThickness;
 pressureAngle = 25;
-motorGearBoreClearance = 0.65;
-gearSupportDiameter = 5.75;
+motorGearBoreClearance = 1.3; // 0.65 for makerbot
+gearSupportDiameter = 5.25;
 gearSupportDepth = 1.5;
 stageOffset = 1;
 encoderTickWidthRatio1 = 1 / 2;
@@ -35,18 +42,20 @@ encoderEtchDepth = receivingGearThickness * 3 / 4;
 addendum = circularPitch / 180; // Extension of the gear beyond the pitch radius
 
 encoderAngularResolution = 0.18;
-encoderTickEdgeOffset = 3.5;
-encoderSmallHoleD = 1.1; // 0.8 for makerbot
-encoderLargeHoleD = 2.7;
-homingTickEdgeOffset = 4;
-homingSmallHoleD = 0.8;
+encoderTickEdgeOffset = 4.5;
+// The intention now with these holes is to only provide a mark or a start
+// But for consistancy they will need to be manually drilled out
+encoderSmallHoleD = 1.0; // 1.4
+encoderLargeHoleD = 2.0; // 2.7
+homingTickEdgeOffset = 4.5;
+// These holes don't need as much consistancy, hahaha...
+homingSmallHoleD = 1.4; // 0.8 for makerbot
 homingLargeHoleD = 4.6;
-homingTicks = 5; // based on the same small and large hole diameters
-encoderShaftBoreD = 5;
+homingTicks = 3; // based on the same small and large hole diameters
+encoderShaftBoreD = 5.6;
 encoderShaftThickness = 1.75;
-wireHoleD = 1.3;
 
-exitShaftDiameter = 7;
+exitShaftDiameter = 8;
 exitShaftLength = 16;
 
 edgeBorder = 2;
@@ -59,7 +68,7 @@ motorAxleHeight = 11;
 motorRadius = motorDiameter / 2;
 motorGearShelterThickness = 2;
 
-insertRidgeThickness = 4; // To prevent motor from being inserted too far
+insertRidgeThickness = 5; // To prevent motor from being inserted too far
 
 angleStep = 2;
 homingPeakN = 4;
@@ -131,20 +140,20 @@ module gearBoxGear(boreDiam, teethNumber, gearThickness, flipped=0, hubD=hubDiam
     }
 }
 
-module gearBoxPinionGearWithBore(boreDiam) {
+module gearBoxPinionGearWithBoreAndThickness(boreDiam, thickness) {
     gearBoxGear(
         boreDiam = boreDiam,
         teethNumber = pinionTeeth,
-        gearThickness = pinionGearThickness,
+        gearThickness = thickness,
         flipped = 1);
 }
 
 module gearBoxMotorGear() {
-    gearBoxPinionGearWithBore(motorGearBoreDiameter + motorGearBoreClearance);
+    gearBoxPinionGearWithBoreAndThickness(motorGearBoreDiameter + motorGearBoreClearance, gear0Thickness);
 }
 
 module gearBoxPinionGear() {
-    gearBoxPinionGearWithBore(gearAxleDiameter + clearance);
+    gearBoxPinionGearWithBoreAndThickness(gearAxleDiameter + clearance, pinionGearThickness);
 }
 
 module gearBoxReceivingGear() {
@@ -156,12 +165,17 @@ module gearBoxReceivingGear() {
 
 module gearBoxExitGear() {
     difference() {
-        gearBoxGear(
-            boreDiam = 0,
-            teethNumber = receivingGearTeeth,
-            gearThickness = receivingGearThickness,
-            hubD = exitShaftDiameter,
-            hubExtension = exitShaftLength + wallThickness + clearance);
+        union() {
+            gearBoxGear(
+                boreDiam = 0,
+                teethNumber = receivingGearTeeth,
+                gearThickness = receivingGearThickness,
+                hubD = 0 * exitShaftDiameter,
+                hubExtension = 0 * (exitShaftLength + wallThickness + clearance));
+            // Hex shaft
+            translate([0, 0, receivingGearThickness])
+            #cylinder(h = exitShaftLength + wallThickness + clearance, d = exitShaftDiameter, $fn = 6);
+        }
         
         // Since we set the bore diameter to 0 so that we don't get an open output shaft
         // we have to make a dent on the bottom side
@@ -173,7 +187,7 @@ module gearBoxExitGear() {
 function pitchRadiusOf(teeth) = teeth * circularPitch / 360;
 
 // Driving motor
-% translate([0, 0, wallThickness / 2 - motorHeight]) {
+% translate([motorXOffset, 0, wallThickness / 2 - motorHeight]) {
     cylinder(h = motorHeight, d = motorDiameter);
     translate([0, 0, motorHeight]) cylinder(h = motorAxleHeight, d = motorAxleDiameter);
 }
@@ -182,7 +196,7 @@ axleHeight = (receivingGearThickness + clearance) * 8;
 
 pinionPitchR = pitchRadiusOf(pinionTeeth);
 receivingGearPitchR = pitchRadiusOf(receivingGearTeeth);
-pitchRadiiSum = pinionPitchR + receivingGearPitchR;
+pitchRadiiSum = pinionPitchR + receivingGearPitchR + pitchRadiiAdjust;
 
 module gearBoxCompoundGear() {
     gearBoxReceivingGear();
@@ -216,6 +230,7 @@ encoderTickInnerR = encoderTickOuterR - encoderTickHeight;
 
 homingTickR = receivingGearPitchR - homingTickEdgeOffset;
 
+// that is, the alignment of the gears vertically
 teethAlignmentOffset = (pinionGearThickness - receivingGearThickness) / 2;
 
 // 4 stages of gears
@@ -293,7 +308,7 @@ module motorShelter() {
     difference() {
         shelterHeight = pinionGearThickness + clearance * 2 + motorGearShelterThickness;
         shelterInnerPeak = motorAxleHeight + clearance * 2;
-        shelterPeakHeight = 3 * stageHeight; // As a support for the gear axle above
+        shelterPeakHeight = stageOffset + 3 * stageHeight; // As a support for the gear axle above
         union() {
             translate([-motorRadius / 3, -motorRadius - motorGearShelterThickness, wallThickness]) {
                 // Main shelter
@@ -350,11 +365,16 @@ module bottomPlate() {
                 motorShelter();
             }
             //Holes for motor
-            translate([0, 0, -clearance - nutTrapAdditionalWallThickness]) {
-                #polyhole(h = clearance + bottomWallThickness - wallThickness / 2,
+            translate([motorXOffset, 0, -clearance - nutTrapAdditionalWallThickness]) {
+                polyhole(h = clearance + bottomWallThickness - wallThickness / 2,
                          d = (motorRadius + clearance) * 2);
-                polyhole(h = bottomWallThickness + clearance + 0.001,
-                        d = (motorRadius + clearance - insertRidgeThickness) * 2);
+                higherHoleHeight = bottomWallThickness + clearance + 0.001;
+                #intersection() {
+                    polyhole(h = higherHoleHeight,
+                            d = (motorRadius + clearance) * 2);
+                    translate([0, 0, higherHoleHeight / 2 - minClearance])
+                    cube([(motorRadius + clearance) * 2, (motorRadius + clearance - insertRidgeThickness) * 2, higherHoleHeight + minClearance * 2], center=true);
+                }
             }
             
             // Screw holes and nut traps
@@ -369,14 +389,13 @@ module bottomPlate() {
             translate([pitchRadiiSum, -homingTickR, -nutTrapAdditionalWallThickness])
                 polyhole(h = bottomWallThickness, d = encoderShaftBoreD + clearance);
             
-            // "homing" encoder bore
-            translate([-homingTickR, 0, wallThickness])
-                polyhole(h = homingShaftLength, d = encoderShaftBoreD + clearance);
-            // holes for wires to come through
-            translate([-homingTickR - encoderShaftBoreD / 2 + clearance, wireHoleD, -nutTrapAdditionalWallThickness])
-                polyhole(h = bottomWallThickness, d = wireHoleD);
-            translate([-homingTickR - encoderShaftBoreD / 2 + clearance, -wireHoleD, -nutTrapAdditionalWallThickness])
-                mirror([1, 0, 0]) polyhole(h = bottomWallThickness, d = wireHoleD);
+            homingShaftBoreHalf = (homingShaftLength + bottomWallThickness) / 2;
+            // "homing" encoder bore: insertion half
+            translate([-homingTickR, 0, -nutTrapAdditionalWallThickness])
+                polyhole(h = homingShaftBoreHalf, d = encoderShaftBoreD + clearance);
+            // "homing" encoder bore: viewport/eye/focus cone half
+            translate([-homingTickR, 0, -nutTrapAdditionalWallThickness + homingShaftBoreHalf])
+                cylinder(h = homingShaftBoreHalf, d1 = encoderShaftBoreD + clearance, d2 = homingLargeHoleD + clearance);
             
             // Axle holes
             translate([pitchRadiiSum, 0, -nutTrapAdditionalWallThickness - minClearance])
@@ -395,6 +414,7 @@ module topPlate() {
     translate([0, 0, topFaceOffset])
     difference() {
         encoderShaftLength = topFaceOffset - minClearance - receivingGearThickness - wallThickness - clearance;
+        ridgeSupportHeight = -(gearSupportMaxH + stageHeight + receivingGearThickness);
         union() {
             translate([-baseOffsetFromMotor, -baseOffsetFromMotor, 0]) {
                 // main plate
@@ -420,31 +440,35 @@ module topPlate() {
             translate([0, pitchRadiiSum, gearSupportMaxH + stageHeight * 2])
                 cylinder(h = -(gearSupportMaxH + stageHeight * 2), d = gearSupportDiameter);
             // Ridge/support around output shaft to hold output gear in place
-            translate([0, 0, gearSupportMaxH + stageHeight + receivingGearThickness])
-                cylinder(h = -(gearSupportMaxH + stageHeight + receivingGearThickness), d = exitShaftDiameter + clearance * 3);
+            translate([0, 0, -ridgeSupportHeight])
+                cylinder(h = ridgeSupportHeight, d = exitShaftDiameter + clearance * 4);
             
             // Encoder sensor shaft
             translate([pitchRadiiSum, -encoderTickOuterR, -encoderShaftLength])
                 cylinder(h = encoderShaftLength, d = encoderShaftBoreD + clearance + encoderShaftThickness);
         }
-        // encoder shaft bore
+        // encoder shaft bore: insertion half
+        encoderShaftBoreHalf = (encoderShaftLength + wallThickness) / 2;
+        translate([pitchRadiiSum, -encoderTickOuterR, -encoderShaftLength + encoderShaftBoreHalf])
+            #polyhole(h = encoderShaftBoreHalf, d = encoderShaftBoreD + clearance);
+        // encoder shaft bore: pin hole cone half to focus on the encoder holes
         translate([pitchRadiiSum, -encoderTickOuterR, -encoderShaftLength])
-            #polyhole(h = encoderShaftLength + wallThickness, d = encoderShaftBoreD + clearance);
+            #cylinder(h = encoderShaftBoreHalf, d1 = encoderLargeHoleD + clearance, d2 = encoderShaftBoreD + clearance);
         // "homing" encoder view port
         translate([-encoderTickOuterR, 0, 0])
             #polyhole(h = wallThickness, d = encoderShaftBoreD + clearance);
         
-        // Axle holes
+        // Axle holes, these should be a looser fit than the ones on the bottom plate
         translate([pitchRadiiSum, 0, -topFaceOffset])
-            #cylinder(h = topFaceOffset + wallThickness + minClearance, d = gearAxleDiameter);
+            #cylinder(h = topFaceOffset + wallThickness + minClearance, d = gearAxleDiameter + clearance / 2);
         translate([pitchRadiiSum, pitchRadiiSum, -topFaceOffset])
-            #cylinder(h = topFaceOffset + wallThickness + minClearance, d = gearAxleDiameter);
+            #cylinder(h = topFaceOffset + wallThickness + minClearance, d = gearAxleDiameter + clearance / 2);
         translate([0, pitchRadiiSum, -topFaceOffset])
-            #cylinder(h = topFaceOffset + wallThickness + minClearance, d = gearAxleDiameter);
+            #cylinder(h = topFaceOffset + wallThickness + minClearance, d = gearAxleDiameter + clearance / 2);
         
         //output shaft
-        translate([0, 0, -clearance - stageOffset])
-            cylinder(h = wallThickness + stageOffset + clearance * 2, d = exitShaftDiameter + clearance * 2);
+        translate([0, 0, -clearance - stageOffset - ridgeSupportHeight])
+            cylinder(h = wallThickness + stageOffset + ridgeSupportHeight + clearance * 2, d = exitShaftDiameter + clearance * 2);
         
         // Screw holes
         translate([-baseOffsetFromMotor, -baseOffsetFromMotor, -topFaceOffset + wallThickness]) {
@@ -460,12 +484,12 @@ module topPlate() {
     }
 }
 
-gear0();
-gear1();
-gear2();
-gear3();
-gear4();
-topPlate();
+//gear0();
+//gear1();
+//gear2();
+//gear3();
+//gear4();
+//topPlate();
 bottomPlate();
 
 gearRatio = receivingGearTeeth / pinionTeeth;
